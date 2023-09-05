@@ -81,11 +81,13 @@
 
 (defn find-route [k8s {:keys [all-namespaces?] :as _search-params
                        search-kind :kind
-                       search-action :action}]
+                       search-action :action
+                       {:keys [filter-handler]} :select-route}]
   (->> (:handlers k8s)
        (filter (fn [handler]
                  (and (or (= (keyword search-kind) (kind handler)) (nil? search-kind))
                       (or (= (keyword search-action) (action handler)) (nil? search-action))
+                      (or (nil? filter-handler) (filter-handler handler))
                       (= (boolean all-namespaces?) (all-namespaces-route? (:route-name handler))))))
        (map :route-name)))
 
@@ -116,18 +118,24 @@
   (concat (:groups (:kubernetes-api.core/api-group-list k8s))
           (core-versions k8s)))
 
-(defn ^:private choose-preffered-version [k8s route-names]
-  (misc/find-first
-   (fn [route]
-     (some #(and (= (:name %) (group-of k8s route))
-                 (= (:version (:preferredVersion %)) (version-of k8s route)))
-           (all-versions k8s)))
-   route-names))
-
-(defn find-preferred-route [k8s search-params]
-  (->> (find-route k8s search-params)
-       (filter (fn [x] (not (string/ends-with? (name x) "Status"))))
-       ((partial choose-preffered-version k8s))))
+(defn find-preferred-route [k8s {:as search-params
+                                 {:keys [remove-status-route?
+                                         preferred-version?
+                                         first-match?]
+                                  :or {remove-status-route? true
+                                       preferred-version? true
+                                       first-match? true}} :select-route}]
+  (cond->> (find-route k8s search-params)
+    remove-status-route? (filter (fn [x] (not (string/ends-with? (name x) "Status"))))
+    preferred-version? (filter (fn [route] (some #(and (= (:name %) (group-of k8s route))
+                                                       (= (:version (:preferredVersion %)) (version-of k8s route)))
+                                                 (all-versions k8s))))
+    first-match? (take 1)
+    true ((fn [vs]
+            (if (> (count vs) 1)
+              (throw (ex-info "Multiple action matches" {:search search-params
+                                                         :routes vs}))
+              (first vs))))))
 
 (defn preffered-version? [k8s handler]
   (let [preffered-route (find-preferred-route k8s {:kind   (handler-kind handler)
